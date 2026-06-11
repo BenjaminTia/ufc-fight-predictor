@@ -1,3 +1,24 @@
+---
+language: python
+license: mit
+tags:
+- ufc
+- mma
+- fight-prediction
+- machine-learning
+- pytorch
+- xgboost
+- lightgbm
+- gpu
+- sports-analytics
+- ensemble
+datasets:
+- wikipedia
+- ufcstats
+library_name: transformers
+pipeline_tag: tabular-classification
+---
+
 <div align="center">
 
 # UFC Fight Predictor
@@ -9,6 +30,7 @@
 [![XGBoost GPU](https://img.shields.io/badge/XGBoost-GPU-green)](https://xgboost.readthedocs.io)
 [![LightGBM GPU](https://img.shields.io/badge/LightGBM-GPU-brightgreen)](https://lightgbm.readthedocs.io)
 [![SHAP](https://img.shields.io/badge/SHAP-Interpretable-ff69b4)](https://shap.readthedocs.io)
+[![HuggingFace](https://img.shields.io/badge/HuggingFace-Model-yellow?logo=huggingface)](https://huggingface.co/benjamintia/ufc-fight-predictor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 </div>
