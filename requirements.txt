@@ -1,0 +1,38 @@
+# ===== Core Data & ML =====
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+scikit-learn==1.5.1
+joblib==1.4.2
+
+# ===== GPU-Accelerated Trees =====
+xgboost==2.1.1
+lightgbm==4.5.0
+
+# ===== PyTorch (CUDA 12.1) =====
+# Install via: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1
+torchvision==0.18.1
+torchaudio==2.3.1
+
+# ===== NLP / Sentiment =====
+transformers==4.42.4
+torch==2.3.1
+sentencepiece==0.2.0
+
+# ===== Web Scraping =====
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.2.2
+selenium==4.22.0
+
+# ===== Model Interpretation =====
+shap==0.45.0
+
+# ===== Visualization =====
+matplotlib==3.9.1
+seaborn==0.13.2
+
+# ===== Utilities =====
+tqdm==4.66.4
+python-dateutil==2.9.0
