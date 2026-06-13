@@ -50,6 +50,7 @@ MODEL_PATHS = {
     "lgb": MODELS_DIR / "lgb_model.txt",
     "nn": MODELS_DIR / "nn_model.pt",
     "meta": MODELS_DIR / "meta_learner.pkl",
+    "nn_temp": MODELS_DIR / "nn_temperature.pkl",
 }
 
 RANDOM_STATE = 42
@@ -57,12 +58,13 @@ EARLY_STOPPING_ROUNDS = 50
 N_FOLDS = 5
 N_TUNE_TRIALS = 30
 
-NN_HIDDEN_LAYERS = [256, 128, 64]
-NN_DROPOUT = 0.2
+NN_HIDDEN_LAYERS = [128, 64]
+NN_DROPOUT = 0.25
 NN_BATCH_SIZE = 64
 NN_EPOCHS = 500
-NN_LR = 0.001
+NN_LR = 0.0008
 NN_PATIENCE = 50
+NN_LABEL_SMOOTHING = 0.05
 TEST_SPLIT_DATE = 0.80
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -95,10 +97,10 @@ LGB_PARAM_GRID = {
 class UFCFightNet(nn.Module):
     """PyTorch neural network base learner for UFC fight prediction."""
 
-    def __init__(self, input_dim, hidden_layers=None, dropout=0.2):
+    def __init__(self, input_dim, hidden_layers=None, dropout=0.25):
         super().__init__()
         if hidden_layers is None:
-            hidden_layers = [256, 128, 64]
+            hidden_layers = [128, 64]
 
         layers = []
         prev_dim = input_dim
@@ -344,7 +346,7 @@ def train_neural_network(X_train, y_train, X_val, y_val, input_dim):
     class_counts = [len(y_train) - y_train.sum(), y_train.sum()]
     pos_weight = torch.tensor([class_counts[0] / max(class_counts[1], 1)]).to(DEVICE)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.AdamW(model.parameters(), lr=NN_LR, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=NN_LR, weight_decay=5e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10,
                                                      min_lr=1e-6)
 
@@ -358,7 +360,8 @@ def train_neural_network(X_train, y_train, X_val, y_val, input_dim):
             batch_X, batch_y = batch_X.to(DEVICE), batch_y.to(DEVICE)
             optimizer.zero_grad()
             outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
+            targets_smooth = batch_y * (1 - NN_LABEL_SMOOTHING) + 0.5 * NN_LABEL_SMOOTHING
+            loss = criterion(outputs, targets_smooth)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -390,6 +393,20 @@ def train_neural_network(X_train, y_train, X_val, y_val, input_dim):
     with torch.no_grad():
         train_preds = model(torch.tensor(X_train, dtype=torch.float32).to(DEVICE)).sigmoid().cpu().numpy()
         val_preds = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE)).sigmoid().cpu().numpy()
+
+    # Compute optimal temperature scaling
+    val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE)).detach().cpu().numpy()
+    best_t = 1.0
+    best_loss = float("inf")
+    for t in np.arange(0.5, 5.1, 0.25):
+        p = 1.0 / (1.0 + np.exp(-val_logits / t))
+        p = p.clip(1e-15, 1 - 1e-15)
+        nll = -np.mean(y_val * np.log(p) + (1 - y_val) * np.log(1 - p))
+        if nll < best_loss:
+            best_loss = nll
+            best_t = t
+    joblib.dump(best_t, MODEL_PATHS["nn_temp"])
+    print(f"  Optimal temperature: {best_t:.2f} (NLL: {best_loss:.4f})")
 
     print(f"  NN train logloss: {log_loss(y_train, train_preds):.4f}")
     print(f"  NN val logloss:   {log_loss(y_val, val_preds):.4f}")

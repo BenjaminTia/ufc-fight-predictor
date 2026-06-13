@@ -150,6 +150,12 @@ def load_profiles():
         np.nan,
     )
 
+    weight_map = {"Strawweight": 1, "Flyweight": 2, "Bantamweight": 3,
+                  "Featherweight": 4, "Lightweight": 5, "Welterweight": 6,
+                  "Middleweight": 7, "Light Heavyweight": 8, "Heavyweight": 9}
+    if "weight" in df.columns:
+        df["weight_class"] = df["weight"].map(weight_map).fillna(5.0)
+
     return df
 
 
@@ -252,7 +258,7 @@ def build_style_matchup_features(fight_df, profiles_df):
         profile_row = profiles_df[profiles_df["full_name"].str.lower() == fighter.lower()] if not profiles_df.empty else pd.DataFrame()
         if not profile_row.empty:
             for col in ["height_inches", "reach_inches", "strike_acc", "strike_def", "td_acc", "td_def",
-                        "slpm", "sapm", "td_avg", "sub_avg", "win_rate", "career_wins", "career_losses"]:
+                        "slpm", "sapm", "td_avg", "sub_avg", "win_rate", "weight_class", "career_wins", "career_losses"]:
                 if col in profile_row.columns:
                     stats[f"profile_{col}"] = profile_row[col].values[0]
 
@@ -281,7 +287,7 @@ def build_style_matchup_features(fight_df, profiles_df):
             row[f"ratio_{metric}"] = a_val / total
 
         for prof_metric in ["height_inches", "reach_inches", "strike_acc", "strike_def",
-                            "td_acc", "td_def", "slpm", "sapm", "td_avg", "sub_avg", "win_rate"]:
+                            "td_acc", "td_def", "slpm", "sapm", "td_avg", "sub_avg", "win_rate", "weight_class"]:
             a_val = fa.get(f"profile_{prof_metric}", np.nan)
             b_val = fb.get(f"profile_{prof_metric}", np.nan)
             if not pd.isna(a_val) and not pd.isna(b_val):
@@ -293,6 +299,13 @@ def build_style_matchup_features(fight_df, profiles_df):
             row["a_experience"] = a_fights
             row["b_experience"] = b_fights
             row["experience_diff"] = a_fights - b_fights
+
+            a_wc = fa.get("profile_weight_class", np.nan)
+            b_wc = fb.get("profile_weight_class", np.nan)
+            if not pd.isna(a_wc) and not pd.isna(b_wc):
+                row["same_weight_class"] = 1.0 if a_wc == b_wc else 0.0
+            else:
+                row["same_weight_class"] = 1.0
 
         features.append(row)
 

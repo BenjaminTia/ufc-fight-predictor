@@ -447,46 +447,84 @@ def main():
     return fights_df
 
 
+WEIGHT_CLASS_ORDER = {
+    "Strawweight": 1, "Flyweight": 2, "Bantamweight": 3,
+    "Featherweight": 4, "Lightweight": 5, "Welterweight": 6,
+    "Middleweight": 7, "Light Heavyweight": 8, "Heavyweight": 9,
+}
+WEIGHT_CLASS_MERGE = {
+    "Strawweight": "Flyweight",
+}
+
+def _fight_power(fighter, opponent):
+    """Realistic fight power score using net striking differential + defense."""
+    s = fighter
+    o = opponent
+    net_striking = s["slpm"] - s["sapm"]
+    return (
+        net_striking * 0.25 +
+        s["slpm"] * 0.08 +
+        s["strike_acc"] / 100 * 0.15 +
+        s["strike_def"] / 100 * 0.18 +
+        s["td_avg"] * 0.10 +
+        s["td_def"] / 100 * 0.12 +
+        s["sub_avg"] * 0.06 +
+        (s["reach_inches"] - o["reach_inches"]) * 0.02 +
+        (s["height_inches"] - o["height_inches"]) * 0.01 +
+        (0.4 if s["td_avg"] > 2.0 and o["td_def"] < 60 else 0) +
+        (0.3 if s["slpm"] > 5.0 and o["strike_def"] < 50 else 0) +
+        (0.25 if s["strike_def"] > 65 and o["slpm"] > 5.5 else 0)
+    )
+
+
 def _generate_fallback_fights():
-    """Generate fallback fights if Wikipedia scraping fails."""
+    """Generate fallback fights with weight class matching and realistic scoring."""
     import random
+    from collections import defaultdict
     random.seed(42)
     np.random.seed(42)
 
-    fighters = list(KNOWN_FIGHTER_STATS.keys())
+    weight_groups = defaultdict(list)
+    for name, stats in KNOWN_FIGHTER_STATS.items():
+        wc = stats.get("weight_class", "Welterweight")
+        merged = WEIGHT_CLASS_MERGE.get(wc, wc)
+        weight_groups[merged].append(name)
+
+    for wc in list(weight_groups.keys()):
+        if len(weight_groups[wc]) < 2:
+            for other in weight_groups:
+                if other != wc and len(weight_groups[other]) >= 3:
+                    weight_groups[other].extend(weight_groups.pop(wc))
+                    break
+
     fights = []
     n_fights = 4000
+    all_fighters = [f for g in weight_groups.values() for f in g]
+    wc_keys = list(weight_groups.keys())
+
     for _ in range(n_fights):
-        fa = random.choice(fighters)
-        fb = random.choice([f for f in fighters if f != fa])
+        if random.random() < 0.08 and len(all_fighters) >= 4:
+            fa = random.choice(all_fighters)
+            fb = random.choice([f for f in all_fighters if f != fa])
+        else:
+            wc = random.choice([k for k in wc_keys if len(weight_groups[k]) >= 2])
+            fa = random.choice(weight_groups[wc])
+            fb = random.choice([f for f in weight_groups[wc] if f != fa])
+
         fa_stats = KNOWN_FIGHTER_STATS[fa]
         fb_stats = KNOWN_FIGHTER_STATS[fb]
 
-        a_power = (
-            fa_stats["slpm"] * 0.20 +
-            fa_stats["td_avg"] * 0.15 +
-            fa_stats["strike_acc"] / 100 * 0.10 +
-            fa_stats["strike_def"] / 100 * 0.10 +
-            fa_stats["td_def"] / 100 * 0.08 +
-            (fa_stats["reach_inches"] - fb_stats["reach_inches"]) * 0.02 +
-            (fa_stats["height_inches"] - fb_stats["height_inches"]) * 0.01
-        )
-        b_power = (
-            fb_stats["slpm"] * 0.20 +
-            fb_stats["td_avg"] * 0.15 +
-            fb_stats["strike_acc"] / 100 * 0.10 +
-            fb_stats["strike_def"] / 100 * 0.10 +
-            fb_stats["td_def"] / 100 * 0.08 +
-            (fb_stats["reach_inches"] - fa_stats["reach_inches"]) * 0.02 +
-            (fb_stats["height_inches"] - fa_stats["height_inches"]) * 0.01
-        )
+        a_power = _fight_power(fa_stats, fb_stats)
+        b_power = _fight_power(fb_stats, fa_stats)
 
         base_diff = a_power - b_power
         noise = random.gauss(0, 0.6)
         winner = "A" if base_diff + noise > 0 else "B"
 
-        prob_ko = 0.25 + abs(fa_stats["slpm"] - fb_stats["sapm"]) * 0.02 if winner == "A" else 0.25 + abs(fb_stats["slpm"] - fa_stats["sapm"]) * 0.02
-        prob_sub = 0.15 + max(fa_stats["sub_avg"], fb_stats["sub_avg"]) * 0.1
+        winner_stats = fa_stats if winner == "A" else fb_stats
+        loser_stats = fb_stats if winner == "A" else fa_stats
+        prob_ko = 0.22 + abs(winner_stats["slpm"] - loser_stats["strike_def"] / 100 * winner_stats["slpm"]) * 0.03
+        prob_sub = 0.12 + max(winner_stats.get("sub_avg", 0), 0) * 0.1
         r = random.random()
         if r < prob_ko:
             method = "KO/TKO"

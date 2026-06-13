@@ -101,6 +101,27 @@ KNOWN_FIGHTERS = {
                        "momentum": 0.8, "sentiment": 0.6},
 }
 
+FIGHTER_WEIGHT_CLASS = {
+    "Jon Jones": 9, "Islam Makhachev": 5, "Alexander Volkanovski": 4, "Israel Adesanya": 7,
+    "Alex Pereira": 8, "Charles Oliveira": 5, "Leon Edwards": 6, "Max Holloway": 4,
+    "Dustin Poirier": 5, "Justin Gaethje": 5, "Sean O'Malley": 3, "Ilia Topuria": 4,
+    "Sean Strickland": 7, "Jiri Prochazka": 8, "Khamzat Chimaev": 7, "Tom Aspinall": 9,
+    "Ciryl Gane": 9, "Colby Covington": 6, "Robert Whittaker": 7, "Arman Tsarukyan": 5,
+    "Brandon Moreno": 2, "Shavkat Rakhmonov": 6, "Petr Yan": 3, "Cory Sandhagen": 3,
+    "Gilbert Burns": 6, "Belal Muhammad": 6, "Conor McGregor": 5, "Kamaru Usman": 6,
+    "Francis Ngannou": 9, "Stipe Miocic": 9, "Deiveson Figueiredo": 3, "Henry Cejudo": 3,
+    "Aljamain Sterling": 4, "Merab Dvalishvili": 3, "Tony Ferguson": 5, "Michael Chandler": 5,
+    "Kevin Holland": 6, "Stephen Thompson": 6, "Derrick Lewis": 9, "Sergei Pavlovich": 9,
+    "Jailton Almeida": 9, "Magomed Ankalaev": 8, "Jan Blachowicz": 8, "Marlon Vera": 3,
+    "Yair Rodriguez": 4, "Arnold Allen": 4, "Calvin Kattar": 4, "Brian Ortega": 4,
+    "Josh Emmett": 4, "Jack Della Maddalena": 6, "Geoff Neal": 6, "Alexandre Pantoja": 2,
+    "Manon Fiorot": 2, "Erin Blanchfield": 2, "Rose Namajunas": 2, "Zhang Weili": 1,
+    "Valentina Shevchenko": 2, "Alexa Grasso": 2, "Jared Cannonier": 7, "Paulo Costa": 7,
+    "Marvin Vettori": 7, "Dominick Reyes": 8, "Curtis Blaydes": 9, "Tai Tuivasa": 9,
+    "Beneil Dariush": 5, "Mateusz Gamrot": 5, "Rafael Fiziev": 5, "Dan Hooker": 5,
+    "Neil Magny": 6, "Derek Brunson": 7, "Anthony Smith": 8, "Aleksandar Rakic": 8,
+}
+
 
 def list_fighters():
     """Print all known fighters."""
@@ -154,7 +175,9 @@ def format_prediction(result, fighter_a, fighter_b):
 def get_fighter_features(fighter_name):
     """Get feature dict for a fighter, with graceful fuzzy matching."""
     if fighter_name in KNOWN_FIGHTERS:
-        return KNOWN_FIGHTERS[fighter_name]
+        features = KNOWN_FIGHTERS[fighter_name].copy()
+        features["weight_class"] = FIGHTER_WEIGHT_CLASS.get(fighter_name, 5)
+        return features
 
     name_lower = fighter_name.lower()
     for known_name, stats in KNOWN_FIGHTERS.items():
@@ -168,6 +191,7 @@ def get_fighter_features(fighter_name):
         "strike_acc": 48, "strike_def": 55, "sub_avg": 0.3,
         "win_rate": 0.70, "height_inches": 71, "reach_inches": 72.0,
         "num_fights": 20, "momentum": 0.0, "sentiment": 0.0,
+        "weight_class": 5,
     }
 
 

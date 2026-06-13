@@ -27,21 +27,20 @@ MODEL_PATHS = {
     "meta": MODELS_DIR / "meta_learner.pkl",
     "scaler": MODELS_DIR / "scaler.pkl",
     "feature_names": MODELS_DIR / "feature_names.pkl",
+    "nn_temp": MODELS_DIR / "nn_temperature.pkl",
 }
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-NN_HIDDEN_LAYERS = [256, 128, 64]
-NN_DROPOUT = 0.2
-NN_TEMPERATURE = 2.0  # Temperature scaling for NN calibration
+NN_HIDDEN_LAYERS = [128, 64]
+NN_DROPOUT = 0.25
 
 
 class UFCFightNet(nn.Module):
-    """Neural network base learner (same architecture as training)."""
-    def __init__(self, input_dim, hidden_layers=None, dropout=0.2):
+    def __init__(self, input_dim, hidden_layers=None, dropout=0.25):
         super().__init__()
         if hidden_layers is None:
-            hidden_layers = [256, 128, 64]
+            hidden_layers = [128, 64]
         layers = []
         prev_dim = input_dim
         for h_dim in hidden_layers:
@@ -90,6 +89,11 @@ class UFCPredictor:
             self.models["nn"].eval()
             print(f"  Loaded Neural Network from {MODEL_PATHS['nn']} ({DEVICE})")
 
+            self.nn_temperature = 2.0
+            if MODEL_PATHS["nn_temp"].exists():
+                self.nn_temperature = float(joblib.load(MODEL_PATHS["nn_temp"]))
+                print(f"  Loaded NN temperature: {self.nn_temperature:.2f}")
+
             self.models["meta"] = joblib.load(MODEL_PATHS["meta"])
             print(f"  Loaded Meta-learner from {MODEL_PATHS['meta']}")
 
@@ -135,7 +139,7 @@ class UFCPredictor:
             ("strike_acc", "strike_acc"), ("strike_def", "strike_def"),
             ("td_acc", "td_acc"), ("td_def", "td_def"),
             ("height_inches", "height_inches"), ("reach_inches", "reach_inches"),
-            ("win_rate", "win_rate"),
+            ("win_rate", "win_rate"), ("weight_class", "weight_class"),
             ("sentiment", "sentiment"), ("momentum", "momentum"),
         ]
 
@@ -153,6 +157,10 @@ class UFCPredictor:
         features["a_experience"] = float(a_exp) if a_exp else 0.0
         features["b_experience"] = float(b_exp) if b_exp else 0.0
         features["experience_diff"] = float(a_exp) - float(b_exp)
+
+        a_wc = fa.get("weight_class", 0)
+        b_wc = fb.get("weight_class", 0)
+        features["same_weight_class"] = 1.0 if a_wc == b_wc else 0.0
 
         features["sentiment_diff"] = features.get("diff_sentiment", features.get("diff_momentum", 0.0))
 
@@ -200,7 +208,7 @@ class UFCPredictor:
         with torch.no_grad():
             X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
             nn_logit = self.models["nn"](X_tensor).item()
-            nn_proba = 1.0 / (1.0 + np.exp(-nn_logit / NN_TEMPERATURE))
+            nn_proba = 1.0 / (1.0 + np.exp(-nn_logit / self.nn_temperature))
 
         meta_X = np.array([[
             xgb_proba, lgb_proba, nn_proba,

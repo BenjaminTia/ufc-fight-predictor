@@ -23,7 +23,7 @@ pipeline_tag: tabular-classification
 
 # UFC Fight Predictor
 
-**A GPU-accelerated ensemble ML system that predicts UFC fight outcomes using quantitative stats, NLP news sentiment, and weighted expert consensus. Achieves 84% accuracy / 0.92 ROC-AUC on test data.**
+**A GPU-accelerated ensemble ML system that predicts UFC fight outcomes using quantitative stats, NLP news sentiment, and weighted expert consensus. 78% accuracy / 0.87 ROC-AUC with proper calibration.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.3%2B-ee4c2c)](https://pytorch.org)
@@ -94,9 +94,10 @@ The model combines three distinct signal sources into a stacked ensemble:
             │  └───────┬────────┘  │
             │  ┌────────────────┐  │
              │  │ PyTorch NN     │  │ (GPU: .to('cuda'))
-             │  │ 3 hidden layers│  │
-             │  │ Dropout(0.2)   │  │
-             │  │ TempScale(2.0) │  │
+             │  │ 2 hidden layers│  │
+             │  │ Dropout(0.25)  │  │
+             │  │ LabelSmooth    │  │
+             │  │ TempScale(1.0) │  │
              │  └───────┬────────┘  │
             │          │           │
             │  ┌───────▼────────┐ │
@@ -121,10 +122,11 @@ The model combines three distinct signal sources into a stacked ensemble:
 | **Qualitative (NLP)** | Recent news sentiment for each fighter | `cardiffnlp/twitter-roberta-base-sentiment-latest` on HuggingFace Transformers, GPU-accelerated. Momentum score = avg_sentiment * 0.4 + article_volume * 0.2 + (1 - volatility) * 0.4 |
 | **Expert Consensus** | Aggregated Tapology/Sherdog picks weighted by historical accuracy | Reliability weight = accuracy * pick_volume_normalized * confidence_normalized |
 
-### 3. Feature Engineering (52 features)
+### 3. Feature Engineering (55 features)
 
 Key feature categories:
 - **Style Matchup:** `diff_sig_str`, `ratio_td`, `diff_ctrl`, `ratio_td_def` — how each fighter's strengths match up against the other's weaknesses
+- **Weight Class:** `same_weight_class`, `diff_weight_class` — prevent unrealistic cross-division predictions
 - **Stamina/Endurance:** Round-by-round dropoff in sig strikes and takedown attempts (fatigue modeling)
 - **Physical:** Height/reach differentials, stance matchup
 - **Experience:** Number of UFC fights, win rate
@@ -134,15 +136,15 @@ Key feature categories:
 ### 4. Model Architecture (Stacked Ensemble)
 
 **Base Learners** (all GPU-accelerated):
-1. **XGBoost** — `tree_method='hist'`, `device='cuda'`, hyperparameter-tuned via random search (max_depth=8, lr=0.05, 800 trees)
-2. **LightGBM** — `device_type='gpu'`, hyperparameter-tuned (num_leaves=127, lr=0.1, 500 trees)
-3. **PyTorch Neural Network** — `.to('cuda')`, 3 hidden layers [256→128→64], ReLU, Dropout(0.2), temperature scaling (T=2.0), early stopping
+1. **XGBoost** — `tree_method='hist'`, `device='cuda'`, tuned (max_depth=4, lr=0.05, 500 trees)
+2. **LightGBM** — `device_type='gpu'`, tuned (num_leaves=31, lr=0.03, 500 trees)
+3. **PyTorch Neural Network** — `.to('cuda')`, 2 hidden layers [128→64], ReLU, Dropout(0.25), label smoothing (0.05), temperature scaling (auto-computed), early stopping
 
 **Meta-Learner:**
 - Logistic Regression trained on: [xgb_proba, lgb_proba, nn_proba, avg_proba, max_proba, min_proba, disagreement]
 - Outputs calibrated probabilities via Platt scaling
 
-**Regularization:** L2 penalty, learning rate scheduling, early stopping, class-weight balancing, gradient clipping
+**Regularization:** L2 penalty, label smoothing (0.05), learning rate scheduling, early stopping, class-weight balancing, gradient clipping, temperature scaling
 
 ### 5. Evaluation
 
@@ -154,10 +156,10 @@ Key feature categories:
 
 | Model | Accuracy | ROC-AUC | LogLoss |
 |-------|----------|---------|---------|
-| XGBoost | **83.7%** | **0.920** | 0.363 |
-| LightGBM | 83.9% | 0.919 | 0.365 |
-| NeuralNet | 81.8% | 0.897 | 0.431 |
-| **Ensemble** | **84.0%** | **0.920** | **0.403** |
+| XGBoost | 77.3% | 0.867 | 0.457 |
+| LightGBM | **77.8%** | **0.870** | 0.454 |
+| NeuralNet | 77.7% | 0.867 | 0.459 |
+| **Ensemble** | **78.0%** | **0.870** | **0.469** |
 
 ---
 
@@ -272,18 +274,18 @@ Example output:
   Islam Makhachev vs Charles Oliveira
   ----------------------------------------
 
-  Islam Makhachev        #################### 60.8%
-  Charles Oliveira       ############### 39.2%
+  Islam Makhachev        ############################### 95.3%
+  Charles Oliveira       ## 4.7%
 
   Predicted Winner:      Islam Makhachev
-  Confidence:            21.7%
+  Confidence:            90.5%
 
   Individual Model Predictions (Fighter A win probability):
-  XGBoost:               63.3%
-  LightGBM:              40.7%
+  XGBoost:               84.5%
+  LightGBM:              85.8%
   Neural Net:            100.0%
 
-  Model Agreement:       40.7% (Low - models disagree)
+  Model Agreement:       84.5% (Moderate)
 ============================================================
 ```
 
@@ -306,7 +308,7 @@ The model's performance scales with data quality. Here's how to improve it:
 
 | Improvement | What To Do |
 |-------------|-----------|
-| **More fights** | Increase `--limit-events 500` in `scrape_ufcstats.py` |
+| **Data quality** | The outcome simulation now uses net striking differential (SLPM - SAPM) instead of raw volume, plus style matchup bonuses. Weight class constraints keep 92% of simulated fights within the same division. |
 | **Real round-by-round stats** | The scraper currently generates stats from career averages. To get real stats, bypass UFCStats.com Cloudflare (try Selenium + undetected-chromedriver) and update `scrape_ufcstats.py` to use the actual `scrape_fight_details()` function. |
 | **Real expert picks** | Tapology blocks automation. Try using Selenium with user login cookies, or scrape manually and save to CSV. |
 | **Real news scraping** | MMA news sites block bots. Try using `newspaper3k` library or a news API. |
