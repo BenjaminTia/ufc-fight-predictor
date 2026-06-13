@@ -32,12 +32,13 @@ MODEL_PATHS = {
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 NN_HIDDEN_LAYERS = [256, 128, 64]
-NN_DROPOUT = 0.35
+NN_DROPOUT = 0.2
+NN_TEMPERATURE = 2.0  # Temperature scaling for NN calibration
 
 
 class UFCFightNet(nn.Module):
     """Neural network base learner (same architecture as training)."""
-    def __init__(self, input_dim, hidden_layers=None, dropout=0.3):
+    def __init__(self, input_dim, hidden_layers=None, dropout=0.2):
         super().__init__()
         if hidden_layers is None:
             hidden_layers = [256, 128, 64]
@@ -46,13 +47,11 @@ class UFCFightNet(nn.Module):
         for h_dim in hidden_layers:
             layers.extend([
                 nn.Linear(prev_dim, h_dim),
-                nn.BatchNorm1d(h_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout),
             ])
             prev_dim = h_dim
         layers.append(nn.Linear(prev_dim, 1))
-        layers.append(nn.Sigmoid())
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -196,11 +195,12 @@ class UFCPredictor:
         X = self._features_to_array(raw_features)
 
         xgb_proba = self.models["xgb"].predict_proba(X)[0, 1]
-        lgb_proba = self.models["lgb"].predict(X)[0]
+        lgb_proba = self.models["lgb"].predict(X, raw_score=False)[0]
 
         with torch.no_grad():
             X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-            nn_proba = self.models["nn"](X_tensor).item()
+            nn_logit = self.models["nn"](X_tensor).item()
+            nn_proba = 1.0 / (1.0 + np.exp(-nn_logit / NN_TEMPERATURE))
 
         meta_X = np.array([[
             xgb_proba, lgb_proba, nn_proba,

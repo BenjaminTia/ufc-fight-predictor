@@ -1,24 +1,25 @@
 """
 Model Training Pipeline
 GPU-accelerated stacked ensemble: XGBoost + LightGBM + PyTorch NN -> Logistic Regression meta-learner.
-Includes chronological train/test split, evaluation, SHAP interpretation, and model saving.
+Includes hyperparameter tuning, 5-fold cross-validation, SHAP interpretation, and model saving.
 """
 
 import os
 import warnings
+import itertools
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import joblib
 
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import StratifiedKFold
 from sklearn.linear_model import LogisticRegression
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
     accuracy_score, log_loss, roc_auc_score, roc_curve,
-    brier_score_loss, classification_report, confusion_matrix,
+    brier_score_loss, confusion_matrix,
 )
+from sklearn.preprocessing import StandardScaler
 
 import xgboost as xgb
 import lightgbm as lgb
@@ -53,21 +54,48 @@ MODEL_PATHS = {
 
 RANDOM_STATE = 42
 EARLY_STOPPING_ROUNDS = 50
+N_FOLDS = 5
+N_TUNE_TRIALS = 30
+
 NN_HIDDEN_LAYERS = [256, 128, 64]
-NN_DROPOUT = 0.35
+NN_DROPOUT = 0.2
 NN_BATCH_SIZE = 64
-NN_EPOCHS = 300
+NN_EPOCHS = 500
 NN_LR = 0.001
-NN_PATIENCE = 30
+NN_PATIENCE = 50
 TEST_SPLIT_DATE = 0.80
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+XGB_PARAM_GRID = {
+    "n_estimators": [300, 500, 800],
+    "max_depth": [4, 6, 8],
+    "learning_rate": [0.01, 0.03, 0.05, 0.1],
+    "subsample": [0.7, 0.8, 1.0],
+    "colsample_bytree": [0.6, 0.8, 1.0],
+    "gamma": [0, 0.1, 0.2],
+    "reg_alpha": [0, 0.1, 1.0],
+    "reg_lambda": [0.1, 1.0, 2.0],
+    "min_child_weight": [1, 3, 5],
+}
+
+LGB_PARAM_GRID = {
+    "n_estimators": [300, 500, 800],
+    "max_depth": [-1, 5, 7, 9],
+    "learning_rate": [0.01, 0.03, 0.05, 0.1],
+    "num_leaves": [31, 63, 127],
+    "subsample": [0.7, 0.8, 1.0],
+    "colsample_bytree": [0.6, 0.8, 1.0],
+    "reg_alpha": [0, 0.1, 1.0],
+    "reg_lambda": [0.1, 1.0, 2.0],
+    "min_child_samples": [5, 10, 20],
+}
 
 
 class UFCFightNet(nn.Module):
     """PyTorch neural network base learner for UFC fight prediction."""
 
-    def __init__(self, input_dim, hidden_layers=None, dropout=0.3):
+    def __init__(self, input_dim, hidden_layers=None, dropout=0.2):
         super().__init__()
         if hidden_layers is None:
             hidden_layers = [256, 128, 64]
@@ -77,14 +105,12 @@ class UFCFightNet(nn.Module):
         for h_dim in hidden_layers:
             layers.extend([
                 nn.Linear(prev_dim, h_dim),
-                nn.BatchNorm1d(h_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout),
             ])
             prev_dim = h_dim
 
         layers.append(nn.Linear(prev_dim, 1))
-        layers.append(nn.Sigmoid())
 
         self.network = nn.Sequential(*layers)
 
@@ -142,116 +168,157 @@ def load_data():
     X = df.drop(columns=[target_col])
     y = df[target_col].values
 
-    split_idx = int(len(X) * TEST_SPLIT_DATE)
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
+    # Shuffle since synthetic dates create distribution artifacts
+    rng = np.random.RandomState(RANDOM_STATE)
+    shuffle_idx = rng.permutation(len(X))
+    X_arr = X.values.astype(np.float32)[shuffle_idx]
+    y_arr = y[shuffle_idx]
+
+    split_idx = int(len(X_arr) * TEST_SPLIT_DATE)
+    X_train, X_test = X_arr[:split_idx], X_arr[split_idx:]
+    y_train, y_test = y_arr[:split_idx], y_arr[split_idx:]
 
     print(f"  Train: {len(X_train)} samples | Test: {len(X_test)} samples")
     print(f"  Train target distribution: A={y_train.sum():.0f} ({y_train.mean():.2%})")
     print(f"  Test target distribution:  A={y_test.sum():.0f} ({y_test.mean():.2%})")
 
-    return (X_train.values.astype(np.float32), X_test.values.astype(np.float32),
-            y_train.astype(np.float32), y_test.astype(np.float32),
-            list(X.columns))
+    return X_train, X_test, y_train.astype(np.float32), y_test.astype(np.float32), list(X.columns)
 
 
-def train_xgboost(X_train, y_train, X_val, y_val):
-    """Train XGBoost with GPU acceleration."""
+def _random_search_from_grid(rng, param_grid):
+    """Sample one random combination from a parameter grid."""
+    params = {}
+    for key, values in param_grid.items():
+        params[key] = values[rng.randint(len(values))]
+    return params
+
+
+def tune_xgboost_cv(X_train, y_train, n_trials=30):
+    """Random search hyperparameter tuning for XGBoost with CV."""
     print("\n" + "=" * 60)
-    print("  Training XGBoost Base Learner (GPU)")
+    print("  Tuning XGBoost Hyperparameters (GPU)")
     print("=" * 60)
 
-    try:
-        model = xgb.XGBClassifier(
-            n_estimators=500,
-            max_depth=6,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            gamma=0.1,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
+    rng = np.random.RandomState(RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+    best_score = -1
+    best_params = None
+
+    for i in range(n_trials):
+        params = _random_search_from_grid(rng, XGB_PARAM_GRID)
+        trial_model = xgb.XGBClassifier(
+            **params,
             tree_method="hist",
             device="cuda",
             random_state=RANDOM_STATE,
-            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
             eval_metric="logloss",
             verbosity=0,
         )
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-        )
-        print(f"  XGBoost train logloss: {log_loss(y_train, model.predict_proba(X_train)[:,1]):.4f}")
-        print(f"  XGBoost val logloss:   {log_loss(y_val, model.predict_proba(X_val)[:,1]):.4f}")
-        print("  XGBoost configured with GPU acceleration (CUDA)")
-        return model
-    except Exception as e:
-        print(f"  XGBoost GPU failed: {e}. Falling back to CPU.")
-        model = xgb.XGBClassifier(
-            n_estimators=500, max_depth=6, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8, gamma=0.1,
-            reg_alpha=0.1, reg_lambda=1.0,
-            tree_method="hist", device="cpu",
-            random_state=RANDOM_STATE,
-            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-            eval_metric="logloss", verbosity=0,
-        )
-        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-        print("  XGBoost trained on CPU (fallback)")
-        return model
+        cv_scores = []
+        for train_idx, val_idx in skf.split(X_train, y_train):
+            X_tr_fold, X_val_fold = X_train[train_idx], X_train[val_idx]
+            y_tr_fold, y_val_fold = y_train[train_idx], y_train[val_idx]
+            trial_model.fit(X_tr_fold, y_tr_fold, eval_set=[(X_val_fold, y_val_fold)],
+                           verbose=False)
+            val_pred = trial_model.predict_proba(X_val_fold)[:, 1]
+            cv_scores.append(roc_auc_score(y_val_fold, val_pred))
+
+        mean_score = np.mean(cv_scores)
+        if (i + 1) % 10 == 0:
+            print(f"  Trial {i+1:2d}/{n_trials} | CV AUC: {mean_score:.4f} | lr={params['learning_rate']} md={params['max_depth']} est={params['n_estimators']}")
+
+        if mean_score > best_score:
+            best_score = mean_score
+            best_params = params
+
+    print(f"  Best XGBoost CV AUC: {best_score:.4f}")
+    print(f"  Best params: {best_params}")
+    return best_params
 
 
-def train_lightgbm(X_train, y_train, X_val, y_val):
-    """Train LightGBM with GPU acceleration."""
+def train_xgboost_tuned(X_train, y_train, X_val, y_val, params):
+    """Train XGBoost with best found parameters."""
     print("\n" + "=" * 60)
-    print("  Training LightGBM Base Learner (GPU)")
+    print("  Training XGBoost (GPU) with Best Params")
+    print("=" * 60)
+    model = xgb.XGBClassifier(
+        **params,
+        tree_method="hist",
+        device="cuda",
+        random_state=RANDOM_STATE,
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        eval_metric="logloss",
+        verbosity=0,
+    )
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    print(f"  Train logloss: {log_loss(y_train, model.predict_proba(X_train)[:,1]):.4f}")
+    print(f"  Val logloss:   {log_loss(y_val, model.predict_proba(X_val)[:,1]):.4f}")
+    return model
+
+
+def tune_lightgbm_cv(X_train, y_train, n_trials=30):
+    """Random search hyperparameter tuning for LightGBM with CV."""
+    print("\n" + "=" * 60)
+    print("  Tuning LightGBM Hyperparameters (GPU)")
     print("=" * 60)
 
-    try:
-        model = lgb.LGBMClassifier(
-            n_estimators=500,
-            max_depth=7,
-            learning_rate=0.05,
-            num_leaves=63,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
+    rng = np.random.RandomState(RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+    best_score = -1
+    best_params = None
+
+    for i in range(n_trials):
+        params = _random_search_from_grid(rng, LGB_PARAM_GRID)
+        trial_model = lgb.LGBMClassifier(
+            **params,
             device_type="gpu",
             random_state=RANDOM_STATE,
             verbose=-1,
         )
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            eval_metric="logloss",
-            callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
-                       lgb.log_evaluation(0)],
-        )
-        print(f"  LightGBM train logloss: {log_loss(y_train, model.predict_proba(X_train)[:,1]):.4f}")
-        print(f"  LightGBM val logloss:   {log_loss(y_val, model.predict_proba(X_val)[:,1]):.4f}")
-        print("  LightGBM configured with GPU acceleration")
-        return model
-    except Exception as e:
-        print(f"  LightGBM GPU failed: {e}. Falling back to CPU.")
-        model = lgb.LGBMClassifier(
-            n_estimators=500, max_depth=7, learning_rate=0.05,
-            num_leaves=63, subsample=0.8, colsample_bytree=0.8,
-            reg_alpha=0.1, reg_lambda=1.0,
-            device_type="cpu", random_state=RANDOM_STATE,
-            verbose=-1,
-        )
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            eval_metric="logloss",
-            callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
-                       lgb.log_evaluation(0)],
-        )
-        print("  LightGBM trained on CPU (fallback)")
-        return model
+        cv_scores = []
+        for train_idx, val_idx in skf.split(X_train, y_train):
+            X_tr_fold, X_val_fold = X_train[train_idx], X_train[val_idx]
+            y_tr_fold, y_val_fold = y_train[train_idx], y_train[val_idx]
+            trial_model.fit(X_tr_fold, y_tr_fold,
+                           eval_set=[(X_val_fold, y_val_fold)],
+                           eval_metric="logloss",
+                           callbacks=[lgb.early_stopping(15, verbose=False),
+                                     lgb.log_evaluation(0)])
+            val_pred = trial_model.predict_proba(X_val_fold)[:, 1]
+            cv_scores.append(roc_auc_score(y_val_fold, val_pred))
+
+        mean_score = np.mean(cv_scores)
+        if (i + 1) % 10 == 0:
+            print(f"  Trial {i+1:2d}/{n_trials} | CV AUC: {mean_score:.4f} | lr={params['learning_rate']} nl={params['num_leaves']} md={params['max_depth']}")
+
+        if mean_score > best_score:
+            best_score = mean_score
+            best_params = params
+
+    print(f"  Best LightGBM CV AUC: {best_score:.4f}")
+    print(f"  Best params: {best_params}")
+    return best_params
+
+
+def train_lightgbm_tuned(X_train, y_train, X_val, y_val, params):
+    """Train LightGBM with best found parameters."""
+    print("\n" + "=" * 60)
+    print("  Training LightGBM (GPU) with Best Params")
+    print("=" * 60)
+    model = lgb.LGBMClassifier(
+        **params,
+        device_type="gpu",
+        random_state=RANDOM_STATE,
+        verbose=-1,
+    )
+    model.fit(X_train, y_train,
+              eval_set=[(X_val, y_val)],
+              eval_metric="logloss",
+              callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                        lgb.log_evaluation(0)])
+    print(f"  Train logloss: {log_loss(y_train, model.predict_proba(X_train)[:,1]):.4f}")
+    print(f"  Val logloss:   {log_loss(y_val, model.predict_proba(X_val)[:,1]):.4f}")
+    return model
 
 
 def train_neural_network(X_train, y_train, X_val, y_val, input_dim):
@@ -278,7 +345,8 @@ def train_neural_network(X_train, y_train, X_val, y_val, input_dim):
     pos_weight = torch.tensor([class_counts[0] / max(class_counts[1], 1)]).to(DEVICE)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.AdamW(model.parameters(), lr=NN_LR, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10,
+                                                     min_lr=1e-6)
 
     checkpoint_path = MODEL_PATHS["nn"]
     early_stopping = EarlyStopping(patience=NN_PATIENCE)
@@ -320,8 +388,8 @@ def train_neural_network(X_train, y_train, X_val, y_val, input_dim):
     model.eval()
 
     with torch.no_grad():
-        train_preds = model(torch.tensor(X_train, dtype=torch.float32).to(DEVICE)).cpu().numpy()
-        val_preds = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE)).cpu().numpy()
+        train_preds = model(torch.tensor(X_train, dtype=torch.float32).to(DEVICE)).sigmoid().cpu().numpy()
+        val_preds = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE)).sigmoid().cpu().numpy()
 
     print(f"  NN train logloss: {log_loss(y_train, train_preds):.4f}")
     print(f"  NN val logloss:   {log_loss(y_val, val_preds):.4f}")
@@ -339,7 +407,7 @@ def build_meta_features(xgb_model, lgb_model, nn_model, X):
         nn_model.eval()
         with torch.no_grad():
             tensor_X = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-            nn_proba = nn_model(tensor_X).cpu().numpy().reshape(-1, 1)
+            nn_proba = nn_model(tensor_X).sigmoid().cpu().numpy().reshape(-1, 1)
     else:
         nn_proba = np.zeros((len(X), 1))
 
@@ -395,7 +463,7 @@ def evaluate_ensemble(models, X_test, y_test, feature_names):
 
     nn_model.eval()
     with torch.no_grad():
-        nn_proba = nn_model(torch.tensor(X_test, dtype=torch.float32).to(DEVICE)).cpu().numpy()
+        nn_proba = nn_model(torch.tensor(X_test, dtype=torch.float32).to(DEVICE)).sigmoid().cpu().numpy()
     nn_proba = nn_proba.clip(0, 1)
 
     meta_X_test = build_meta_features(xgb_model, lgb_model, nn_model, X_test)
@@ -587,14 +655,19 @@ def main():
 
     X_train, X_test, y_train, y_test, feature_names = load_data()
 
+    # Step 1: Hyperparameter tuning on training set via cross-validation
+    xgb_best_params = tune_xgboost_cv(X_train, y_train, n_trials=N_TUNE_TRIALS)
+    lgb_best_params = tune_lightgbm_cv(X_train, y_train, n_trials=N_TUNE_TRIALS)
+
+    # Step 2: Train final models using train/val split
     val_size = int(len(X_train) * 0.15)
     X_tr, X_val = X_train[:-val_size], X_train[-val_size:]
     y_tr, y_val = y_train[:-val_size], y_train[-val_size:]
 
     print(f"\n  Training split: {len(X_tr)} train | {len(X_val)} validation | {len(X_test)} test")
 
-    xgb_model = train_xgboost(X_tr, y_tr, X_val, y_val)
-    lgb_model = train_lightgbm(X_tr, y_tr, X_val, y_val)
+    xgb_model = train_xgboost_tuned(X_tr, y_tr, X_val, y_val, xgb_best_params)
+    lgb_model = train_lightgbm_tuned(X_tr, y_tr, X_val, y_val, lgb_best_params)
     nn_model = train_neural_network(X_tr, y_tr, X_val, y_val, input_dim=X_train.shape[1])
 
     print("\n" + "=" * 60)
@@ -615,10 +688,11 @@ def main():
     print("\n" + "=" * 60)
     print("  Training Complete! Summary:")
     print("=" * 60)
-    print(f"  Best ROC-AUC: {results['ROC-AUC']['Ensemble']:.4f} (Ensemble)")
-    print(f"  Best LogLoss: {results['LogLoss']['Ensemble']:.4f} (Ensemble)")
-    print(f"  Best Accuracy: {results['Accuracy']['Ensemble']:.4f} (Ensemble)")
-    print(f"\n  Next step: python scripts/predict_fight.py --fighter_a 'Fighter A' --fighter_b 'Fighter B'")
+    print(f"  Ensemble ROC-AUC:  {results['ROC-AUC']['Ensemble']:.4f}")
+    print(f"  Ensemble Accuracy: {results['Accuracy']['Ensemble']:.4f}")
+    print(f"  Ensemble LogLoss:  {results['LogLoss']['Ensemble']:.4f}")
+    print(f"\n  Best single model: {results['ROC-AUC'].idxmax()} ({results['ROC-AUC'].max():.4f})")
+    print(f"\n  Next step: python scripts/predict_fight.py -a 'Fighter A' -b 'Fighter B'")
 
     return models, results
 

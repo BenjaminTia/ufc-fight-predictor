@@ -451,33 +451,61 @@ def _generate_fallback_fights():
     """Generate fallback fights if Wikipedia scraping fails."""
     import random
     random.seed(42)
+    np.random.seed(42)
 
     fighters = list(KNOWN_FIGHTER_STATS.keys())
     fights = []
-    for _ in range(250):
+    n_fights = 4000
+    for _ in range(n_fights):
         fa = random.choice(fighters)
         fb = random.choice([f for f in fighters if f != fa])
         fa_stats = KNOWN_FIGHTER_STATS[fa]
         fb_stats = KNOWN_FIGHTER_STATS[fb]
 
-        a_power = fa_stats["slpm"] + fa_stats["td_avg"] * 2 - fb_stats["sapm"] * 0.5 + fa_stats["strike_acc"] * 0.1
-        b_power = fb_stats["slpm"] + fb_stats["td_avg"] * 2 - fa_stats["sapm"] * 0.5 + fb_stats["strike_acc"] * 0.1
-        winner = "A" if a_power + random.gauss(0, 3) > b_power + random.gauss(0, 3) else "B"
-        method = "Decision"
-        if random.random() < 0.35:
+        a_power = (
+            fa_stats["slpm"] * 0.20 +
+            fa_stats["td_avg"] * 0.15 +
+            fa_stats["strike_acc"] / 100 * 0.10 +
+            fa_stats["strike_def"] / 100 * 0.10 +
+            fa_stats["td_def"] / 100 * 0.08 +
+            (fa_stats["reach_inches"] - fb_stats["reach_inches"]) * 0.02 +
+            (fa_stats["height_inches"] - fb_stats["height_inches"]) * 0.01
+        )
+        b_power = (
+            fb_stats["slpm"] * 0.20 +
+            fb_stats["td_avg"] * 0.15 +
+            fb_stats["strike_acc"] / 100 * 0.10 +
+            fb_stats["strike_def"] / 100 * 0.10 +
+            fb_stats["td_def"] / 100 * 0.08 +
+            (fb_stats["reach_inches"] - fa_stats["reach_inches"]) * 0.02 +
+            (fb_stats["height_inches"] - fa_stats["height_inches"]) * 0.01
+        )
+
+        base_diff = a_power - b_power
+        noise = random.gauss(0, 0.6)
+        winner = "A" if base_diff + noise > 0 else "B"
+
+        prob_ko = 0.25 + abs(fa_stats["slpm"] - fb_stats["sapm"]) * 0.02 if winner == "A" else 0.25 + abs(fb_stats["slpm"] - fa_stats["sapm"]) * 0.02
+        prob_sub = 0.15 + max(fa_stats["sub_avg"], fb_stats["sub_avg"]) * 0.1
+        r = random.random()
+        if r < prob_ko:
             method = "KO/TKO"
-        elif random.random() < 0.20:
+        elif r < prob_ko + prob_sub:
             method = "Submission"
+        else:
+            method = "Decision"
+
+        fight_round = min(5, max(1, int(random.gauss(2.5, 1.2))))
 
         fights.append({
-            "event_name": f"UFC {random.choice(range(100, 310))}",
+            "event_name": f"UFC {random.choice(range(100, 310))}: Simulated",
             "event_date": f"202{random.choice(range(0,5))}-{random.randint(1,12):02d}-{random.randint(1,28):02d}",
             "fighter_a": fa,
             "fighter_b": fb,
             "winner": winner,
             "method_type": method,
-            "method_detail": f"{method} round {random.randint(1,5)}",
-            "round": random.randint(1, 5),
+            "method_detail": f"{method} round {fight_round}",
+            "round": fight_round,
         })
     return fights
 
