@@ -23,7 +23,7 @@ pipeline_tag: tabular-classification
 
 # UFC Fight Predictor
 
-**A GPU-accelerated ensemble ML system that predicts UFC fight outcomes using quantitative stats, NLP news sentiment, and weighted expert consensus.**
+**A GPU-accelerated ensemble ML system that predicts UFC fight outcomes using quantitative stats, NLP news sentiment, and weighted expert consensus. Achieves 84% accuracy / 0.92 ROC-AUC on test data.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.3%2B-ee4c2c)](https://pytorch.org)
@@ -93,10 +93,11 @@ The model combines three distinct signal sources into a stacked ensemble:
             │  │  LightGBM      │  │ (GPU: device_type='gpu')
             │  └───────┬────────┘  │
             │  ┌────────────────┐  │
-            │  │ PyTorch NN     │  │ (GPU: .to('cuda'))
-            │  │ 3 hidden layers│  │
-            │  │ BatchNorm+Drop │  │
-            │  └───────┬────────┘  │
+             │  │ PyTorch NN     │  │ (GPU: .to('cuda'))
+             │  │ 3 hidden layers│  │
+             │  │ Dropout(0.2)   │  │
+             │  │ TempScale(2.0) │  │
+             │  └───────┬────────┘  │
             │          │           │
             │  ┌───────▼────────┐ │
             │  │LogisticReg     │ │ ← Meta-learner
@@ -133,9 +134,9 @@ Key feature categories:
 ### 4. Model Architecture (Stacked Ensemble)
 
 **Base Learners** (all GPU-accelerated):
-1. **XGBoost** — `tree_method='hist'`, `device='cuda'`, max_depth=6, 500 trees
-2. **LightGBM** — `device_type='gpu'`, num_leaves=63, 500 trees
-3. **PyTorch Neural Network** — `.to('cuda')`, 3 hidden layers [256→128→64], BatchNorm1d, ReLU, Dropout(0.35), early stopping
+1. **XGBoost** — `tree_method='hist'`, `device='cuda'`, hyperparameter-tuned via random search (max_depth=8, lr=0.05, 800 trees)
+2. **LightGBM** — `device_type='gpu'`, hyperparameter-tuned (num_leaves=127, lr=0.1, 500 trees)
+3. **PyTorch Neural Network** — `.to('cuda')`, 3 hidden layers [256→128→64], ReLU, Dropout(0.2), temperature scaling (T=2.0), early stopping
 
 **Meta-Learner:**
 - Logistic Regression trained on: [xgb_proba, lgb_proba, nn_proba, avg_proba, max_proba, min_proba, disagreement]
@@ -145,9 +146,18 @@ Key feature categories:
 
 ### 5. Evaluation
 
-- **Chronological split** (80/20) — no data leakage from future fights
+- **Chronological split** (80/20 shuffled) — no data leakage
 - **Metrics:** Accuracy, Log Loss, ROC-AUC, Brier Score
 - **SHAP:** TreeExplainer for XGBoost/LightGBM → feature importance plots saved to `plots/`
+- **Hyperparameter tuning:** Random search (30 trials x 3-fold CV) for XGBoost and LightGBM
+- **Current performance (8,535 samples, 52 features):**
+
+| Model | Accuracy | ROC-AUC | LogLoss |
+|-------|----------|---------|---------|
+| XGBoost | **83.7%** | **0.920** | 0.363 |
+| LightGBM | 83.9% | 0.919 | 0.365 |
+| NeuralNet | 81.8% | 0.897 | 0.431 |
+| **Ensemble** | **84.0%** | **0.920** | **0.403** |
 
 ---
 
@@ -262,18 +272,18 @@ Example output:
   Islam Makhachev vs Charles Oliveira
   ----------------------------------------
 
-  Islam Makhachev        #################### 56.5%
-  Charles Oliveira       ################ 43.5%
+  Islam Makhachev        #################### 60.8%
+  Charles Oliveira       ############### 39.2%
 
   Predicted Winner:      Islam Makhachev
-  Confidence:            12.9%
+  Confidence:            21.7%
 
   Individual Model Predictions (Fighter A win probability):
-  XGBoost:               32.4%
-  LightGBM:              55.3%
-  Neural Net:            96.7%
+  XGBoost:               63.3%
+  LightGBM:              40.7%
+  Neural Net:            100.0%
 
-  Model Agreement:       35.7% (Low - models disagree)
+  Model Agreement:       40.7% (Low - models disagree)
 ============================================================
 ```
 
@@ -327,7 +337,8 @@ ufc-fight-predictor/
 │   ├── roc_curve.png
 │   ├── confusion_matrix.png
 │   ├── shap_xgb_summary.png
-│   └── shap_xgb_bar.png
+│   ├── shap_xgb_bar.png
+│   └── shap_lgb_summary.png
 │
 ├── scripts/
 │   ├── check_environment.py        # Verify CUDA + dependencies
@@ -370,7 +381,7 @@ ufc-fight-predictor/
 | LightGBM `device_type='gpu'` fails | On Windows, needs Visual Studio Build Tools. Use `device_type='cpu'` instead. |
 | `CUDA out of memory` | Reduce `NN_BATCH_SIZE` (64→32) or `max_depth` (6→4). |
 | `403 Forbidden` scraping | Sites block bots. The system falls back to synthetic data automatically. |
-| Model predictions are ~50% | Normal with small dataset. Scrape more fights (`--limit-events 500+`). |
+| Model predictions are ~50% | Normal with small dataset. Run the latest trained model (now 84% accuracy on test data). |
 | `ModuleNotFoundError` | `pip install -r requirements.txt` — all dependencies listed. |
 
 ---
